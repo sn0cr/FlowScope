@@ -88,7 +88,6 @@ function master(args)
 	moon.startSharedTask("fillLevelChecker", args, qq)
 	--moon.startTask("fillLevelChecker", args, qq)
 	moon.waitForTasks()
-	tracker:delete()
 	qq:delete()
 	log:info("[master]: Shutdown")
 end
