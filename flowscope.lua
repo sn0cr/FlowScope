@@ -71,17 +71,6 @@ function master(args)
 		moon.startTask("continuousDumper", args, qq, i, args.path, pipes[i])
 	end
 
--- 	local tracker = flowtracker.createTBBMapv4(2^20)
-
-	local tracker = flowtracker.createTBBTracker(2^20)
-	moon.startTask("swapper", args, tracker, pipes)
-
-	for i = 1, args.analyzeThreads do
--- 		moon.startTask("dummyAnalyzer", qq, i)
--- 		moon.startTask("TBBAnalyzer", qq, i, tracker, pipes)
-		moon.startTask("TBBTrackerAnalyzer", args, qq, i, tracker, pipes)
-	end
-
 	-- start the webserver
 	if args.apiAddress ~= nil then
 		webServer.startWebserverTask(
@@ -99,7 +88,6 @@ function master(args)
 	moon.startSharedTask("fillLevelChecker", args, qq)
 	--moon.startTask("fillLevelChecker", args, qq)
 	moon.waitForTasks()
-	tracker:delete()
 	qq:delete()
 	log:info("[master]: Shutdown")
 end
@@ -112,23 +100,6 @@ end
 
 function initWebserverTask(turbo, args, pipes)
 	return restApi.start(turbo, args, pipes)
-end
-
-function swapper(args, tracker, pipes)
-	log:setLevel(args.logLevel)
-	local sz = 256
-	local buf = ffi.new("struct expired_flow4[?]", sz)
-	while moon.running() do
-		local c = tracker:swapper(buf, sz)
-		for i = 0, tonumber(c) - 1 do
-			local event = ev.newEvent(filterExprFromTuple(buf[i].tpl), ev.delete, nil, tonumber(buf[i].last_seen))
-			log:info("[Swapper]: Sending event: %i, %s %i", event.action, event.filter, event.timestamp)
-			for _, pipe in ipairs(pipes) do
-				pipe:send(event)
-			end
-		end
-	end
-	log:info("[Swapper]: Shutdown")
 end
 
 function traffic_generator(args, qq, id, packetSize, newFlowRate, rate)
@@ -213,116 +184,6 @@ function filterExprFromTuple(tpl)
 	return s
 end
 
-function TBBTrackerAnalyzer(args, qq, id, hashmap, pipes)
-	log:setLevel(args.logLevel)
-	local hashmap = hashmap
-	local rxCtr = stats:newManualRxCounter("TBB Tracker Analyzer Thread #" .. id, "plain")
-	local epsilon = 2  -- allowed area around the avrg. TLL
-	local tuple = ffi.new("struct ipv4_5tuple")
-
-	local acc = flowtracker.createAccessor()
-
-	while moon.running() do
-		local storage = qq:tryPeek()
-		if storage == nil then
-			goto continue
-		end
-		for i = 0, storage:size() - 1 do
-			local pkt = storage:getPacket(i)
-			rxCtr:updateWithSize(1, pkt.pkt_len)
-			local TTL
-			local lookup = false
-			-- Parsing begins
-			local ethPkt = pktLib.getEthernetPacket(pkt)
-			if ethPkt.eth:getType() == eth.TYPE_IP then
-				-- actual L4 type doesn't matter
-				local parsedPkt = pktLib.getUdp4Packet(pkt)
-				tuple.ip_dst = parsedPkt.ip4:getDst()
-				tuple.ip_src = parsedPkt.ip4:getSrc()
-				TTL = parsedPkt.ip4:getTTL()
-				if parsedPkt.ip4:getProtocol() == ip.PROTO_UDP then
-					tuple.port_dst = parsedPkt.udp:getDstPort()
-					tuple.port_src = parsedPkt.udp:getSrcPort()
-					tuple.proto = parsedPkt.ip4:getProtocol()
-					lookup = true
-				elseif parsedPkt.ip4:getProtocol() == ip.PROTO_TCP then
-					-- port at the same position as UDP
-					tuple.port_dst = parsedPkt.udp:getDstPort()
-					tuple.port_src = parsedPkt.udp:getSrcPort()
-					tuple.proto = parsedPkt.ip4:getProtocol()
-					lookup = true
-				elseif parsedPkt.ip4:getProtocol() == ip.PROTO_SCTP then
-					-- port at the same position as UDP
-					tuple.port_dst = parsedPkt.udp:getDstPort()
-					tuple.port_src = parsedPkt.udp:getSrcPort()
-					tuple.proto = parsedPkt.ip4:getProtocol()
-					lookup = true
-				end
--- 			elseif ethPkt.eth:getType() == eth.TYPE_IP6 then
--- 				local parsedPkt = pktLib.getUdp6Packet(pkt)
--- 				replacements.srcIP = pkt.ip6:getSrcString()
--- 				replacements.dstIP = pkt.ip6:getDstString()
--- 				TTL = parsedPkt.ip6:getTTL()
--- 				if parsedPkt.ip6:getNextHeader() == ip.PROTO_UDP then
--- 					tuple.port_dst = parsedPkt.udp:getDstPort()
--- 					tuple.port_src = parsedPkt.udp:getSrcPort()
--- 					tuple.proto = parsedPkt.ip4:getProtocol()
--- 				elseif parsedPkt.ip6:getNextHeader() == ip.PROTO_TCP then
--- 					-- port at the same position as UDP
--- 					tuple.port_dst = parsedPkt.udp:getDstPort()
--- 					tuple.port_src = parsedPkt.udp:getSrcPort()
--- 					tuple.proto = parsedPkt.ip4:getProtocol()
--- 				elseif parsedPkt.ip6:getNextHeader() == ip.PROTO_SCTP then
--- 					-- port at the same position as UDP
--- 					tuple.port_dst = parsedPkt.udp:getDstPort()
--- 					tuple.port_src = parsedPkt.udp:getSrcPort()
--- 					tuple.proto = parsedPkt.ip4:getProtocol()
--- 				else
---
--- 				end
-			end
-			-- Parsing ends
-			if not lookup then
-				goto skipLookup
-			end
-			hashmap:access2(tuple, acc)
-			local ttlData = acc:get()
-			ttlData.last_seen = pkt.ts_vlan
-			local ano = flowtracker.updateAndCheck(ttlData, TTL, epsilon)
-			--local ano = math.random(0, 10000000) == 0 or 0
-			if ano ~= 0 then
-				ttlData.tracked = true
-				local event = ev.newEvent(filterExprFromTuple(tuple), ev.create)
-				log:warn("[TBB Analyzer Thread #%i]: Anomalous TTL: %i != %i, %s, ts %f", id, TTL, ano, event.filter, pkt:getTimestamp())
-				for _, pipe in ipairs(pipes) do
-					pipe:send(event)
-				end
-			end
-			acc:release()
-			::skipLookup::
-		end
-		storage:release()
-		::continue::
-	end
-	rxCtr:finalize()
-	acc:free()
-	log:info("[Analyzer]: Shutdown")
-end
-
-function dummyAnalyzer(args, qq, id)
-	log:setLevel(args.logLevel)
-	local rxCtr = stats:newManualRxCounter("QQ Dummy Analyzer Thread #" .. id, "plain")
-	while moon.running() do
-		local storage = qq:peek()
-		for i = 0, storage:size() - 1 do
-			local pkt = storage:getPacket(i)
-			rxCtr:updateWithSize(1, pkt.pkt_len)
-		end
-		storage:release()
-	end
-	rxCtr:finalize()
-end
-
 function continuousDumper(args, qq, id, path, filterPipe)
 	log:setLevel(args.logLevel)
 	pcap:setInitialFilesize(2^21) -- 2 MiB
@@ -331,7 +192,7 @@ function continuousDumper(args, qq, id, path, filterPipe)
 	local maxRules = args.maxRules
 	local rxCtr = stats:newManualRxCounter("Dumper Thread   #" .. id, "plain")
 	local lastTS = 0
-	
+
 	require("jit.p").start("l2s")
 	while moon.running() do
 		-- Get new filters
