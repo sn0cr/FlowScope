@@ -69,7 +69,6 @@ function mod.start(turbo, args, pipes)
         local function createFilter()
             -- this will raise an error if json is not present
             local jsonBody = self:get_json(true)
-
             -- decide if we have an array of filters or only one filter
             -- specific to one filter are the keys 'filter' and 'id' - but should not have more than 'filter', 'id',
             -- 'timestamp' and 'pipes' - else we are ignoring them
@@ -79,7 +78,6 @@ function mod.start(turbo, args, pipes)
             end
 
             local singleFilter = jsonBody['filter'] ~= nil or jsonBody['id'] ~= nil
-
             if singleFilter then
                 if apiUtils.checkFilterAttributes(jsonBody) then
                     local filter = apiUtils.prepareFilter(jsonBody, ALLOWED_PIPES)
@@ -101,13 +99,14 @@ function mod.start(turbo, args, pipes)
                     apiUtils.applyFilter(filter, filters, pipes)
                     appliedFilter[#appliedFilter + 1] = filter
                 else
-                    filter_error[#filter_error + 1] = filter
+                    jsonFilter['message'] = 'Malformed keys'
+                    filter_error[#filter_error + 1] = jsonFilter
                 end
             end
             if #filter_error ~= 0 then
                 return error(turbo.web.HTTPError(400, {
                     error = "Filter json malformed.",
-                    error_ids = filter_error,
+                    erroneous_filter = filter_error,
                     applied_filter = appliedFilter
                 }))
             else
